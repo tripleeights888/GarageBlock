@@ -73,7 +73,9 @@ const DEFAULTS = {
   v:1,
   settings:{startDate:"2026-07-20",startWeight:190,goalWeight:170,cal:2150,protein:185,
     steps:8000,water:90,lifts:3,cardio:2,units:"lb",
-    barWeight:45,ssbWeight:60,plates:"45x2, 35x1, 25x1, 10x2, 5x1, 2.5x1",autoSync:false,mode:"rolling"},
+    bars:[{name:"Ohio Bar",w:45},{name:"SSB",w:70},{name:"Curl Bar",w:30}],
+    plateInv:{"45":4,"35":2,"25":2,"10":4,"5":2,"2.5":2},barPref:{},
+    autoSync:false,mode:"rolling"},
   work:{},       // "week-idx" -> {date, sets:[{w,r}...], done, rpe, note}
   extras:{},     // "YYYY-MM-DD" -> [{ex, sets:[{w,r}], note}]
   skips:{},      // "week|Day" -> true (session waved off; queue moves on)
@@ -87,7 +89,19 @@ function load(){
     S = raw ? JSON.parse(raw) : JSON.parse(JSON.stringify(DEFAULTS));
     // fill any missing keys from defaults (schema drift safety)
     for(const k of Object.keys(DEFAULTS)) if(S[k]===undefined) S[k]=JSON.parse(JSON.stringify(DEFAULTS[k]));
-    for(const k of Object.keys(DEFAULTS.settings)) if(S.settings[k]===undefined) S.settings[k]=DEFAULTS.settings[k];
+    for(const k of Object.keys(DEFAULTS.settings)) if(S.settings[k]===undefined) S.settings[k]=JSON.parse(JSON.stringify(DEFAULTS.settings[k]));
+    // migrate v1 plate-math settings (typed string + two bar fields) to chips + bar list
+    if(typeof S.settings.plates==="string"){
+      const inv={};
+      S.settings.plates.split(",").forEach(part=>{
+        const m=part.trim().match(/([\d.]+)\s*[x\u00d7]\s*(\d+)/i);
+        if(m) inv[m[1]]=+m[2]*2; // old setting counted per side; chips count total plates
+      });
+      if(Object.keys(inv).length) S.settings.plateInv=inv;
+      if(typeof S.settings.barWeight==="number"&&S.settings.barWeight!==45) S.settings.bars[0].w=S.settings.barWeight;
+      if(typeof S.settings.ssbWeight==="number"&&S.settings.ssbWeight!==60) S.settings.bars[1].w=S.settings.ssbWeight;
+      delete S.settings.plates; delete S.settings.barWeight; delete S.settings.ssbWeight;
+    }
   }catch(e){ S = JSON.parse(JSON.stringify(DEFAULTS)); }
 }
 function save(){
@@ -150,23 +164,39 @@ function restSeconds(str){
 }
 
 /* ---------- plate math ---------- */
+const PLATE_DENOMS=[55,45,35,25,15,10,5,2.5,1.25];
 function plateInventory(){
-  // "45x2, 25x1" -> [{p:45,n:2},...] where n = plates available PER SIDE
-  const out=[];
-  String(S.settings.plates||"").split(",").forEach(part=>{
-    const m=part.trim().match(/([\d.]+)\s*[x\u00d7]\s*(\d+)/i);
-    if(m) out.push({p:+m[1], n:+m[2]});
-  });
-  out.sort((a,b)=>b.p-a.p);
-  return out;
+  // chips count TOTAL plates owned; a barbell loads in pairs, so usable per side = floor(total/2)
+  const inv=S.settings.plateInv||{};
+  return Object.keys(inv).map(p=>({p:+p,n:Math.floor((inv[p]||0)/2)})).filter(o=>o.n>0).sort((a,b)=>b.p-a.p);
 }
+function platesTap(p){ const inv=S.settings.plateInv; inv[p]=Math.min(24,(inv[p]||0)+1); save(); render(); }
+function platesMinus(p){ const inv=S.settings.plateInv; inv[p]=Math.max(0,(inv[p]||0)-1); if(!inv[p]) delete inv[p]; save(); render(); }
 const STRAIGHT_BAR = ["Bench Press","Deadlift","Romanian Deadlift","Standing Overhead Press"];
-function barWeightFor(exName){
-  if(/SSB|Safety Squat Bar/i.test(exName)) return +S.settings.ssbWeight||60;
-  if(STRAIGHT_BAR.includes(exName)) return +S.settings.barWeight||45;
-  return null; // dumbbell / landmine / bodyweight: no plate hint
+function defaultBarIdx(exName){
+  const bars=S.settings.bars;
+  if(/SSB|Safety Squat Bar/i.test(exName)){ const i=bars.findIndex(b=>/ssb|safety/i.test(b.name)); return i>=0?i:null; }
+  if(STRAIGHT_BAR.includes(exName)){ const i=bars.findIndex(b=>!/ssb|safety|curl/i.test(b.name)); return i>=0?i:null; }
+  return null; // dumbbell / landmine / bodyweight
 }
-let logBarW=null; // bar weight for the exercise currently in the log modal
+function barIdxFor(exName){
+  const pref=S.settings.barPref||{};
+  if(pref[exName]!==undefined) return pref[exName]; // may be -1 = no bar
+  return defaultBarIdx(exName);
+}
+function barWeightFor(exName){ // kept for tests/back-compat: returns weight or null
+  const i=barIdxFor(exName);
+  return (i==null||i<0)?null:+S.settings.bars[i].w;
+}
+let logBarW=null, logBarEx=null; // bar weight + exercise for the open log modal
+function setLogBar(i){
+  S.settings.barPref[logBarEx]=i; save();
+  logBarW = i<0?null:+S.settings.bars[i].w;
+  // repaint picker buttons + hint without rebuilding the modal (keeps typed values)
+  document.querySelectorAll("#bar-seg button").forEach((b,bi)=>b.classList.toggle("on",(+b.dataset.i)===i));
+  const hint=document.getElementById("plate-hint");
+  if(hint){ if(logBarW==null){ hint.textContent=""; } else { for(let k=0;k<12;k++){ const f=document.getElementById("lg-w"+k); if(f&&f.value){ plateHint(k); return; } } hint.textContent=""; } }
+}
 function plateMath(target, bar){
   if(!target || target<bar) return null;
   let used=[], left=(target-bar)/2;
@@ -434,12 +464,19 @@ function openLog(week, idx, date){
       <button class="iconbtn" title="Copy previous set" onclick="copySet(${i})">\u2193</button>
     </div>`;
   }
+  logBarEx = t.ex;
   logBarW = barWeightFor(t.ex);
+  const showBarPicker = defaultBarIdx(t.ex)!=null || (S.settings.barPref||{})[t.ex]!==undefined;
+  const barSeg = showBarPicker ? `<div class="seg" id="bar-seg" style="margin:0 0 8px">
+      ${S.settings.bars.map((b,i)=>`<button data-i="${i}" class="${barIdxFor(t.ex)===i?"on":""}" onclick="setLogBar(${i})">${esc(b.name)} ${b.w}</button>`).join("")}
+      <button data-i="-1" class="${barIdxFor(t.ex)===-1?"on":""}" onclick="setLogBar(-1)">No bar</button>
+    </div>` : "";
   openModal(`<h2>${esc(t.ex)}</h2>
     <p class="muted small" style="margin-bottom:12px">${t.sets} \u00d7 ${esc(t.reps)} \u00b7 ${esc(t.intensity)}
       ${last?`<br>Last time: ${last.sets.map(s=>s.w+"\u00d7"+s.r).join(", ")} (${fmtShort(last.date)})`:""}</p>
     ${rows}
-    ${logBarW!=null?`<div id="plate-hint" class="small" style="min-height:18px;color:var(--steel);margin:2px 0 4px"></div>`:""}
+    ${barSeg}
+    ${showBarPicker?`<div id="plate-hint" class="small" style="min-height:18px;color:var(--steel);margin:2px 0 4px"></div>`:""}
     <div class="row" style="margin:8px 0 10px">
       <div class="nfield grow"><label>RPE (optional)</label><input inputmode="decimal" id="lg-rpe" value="${esc(rec.rpe||"")}" placeholder="6\u20138"></div>
       <div class="nfield" style="flex:2"><label>Note</label><input id="lg-note" value="${esc(rec.note||"")}"></div>
@@ -820,13 +857,23 @@ function renderMore(){
     </div>
 
     <div class="card"><h2>Plate math</h2>
-      <div class="ngrid">
-        ${set("barWeight","Straight bar (lb)")}
-        ${set("ssbWeight","Safety squat bar (lb)")}
+      <h3 style="margin-bottom:6px">Bars</h3>
+      ${s.bars.map((b,i)=>`<div class="row" style="margin-bottom:8px">
+        <input value="${esc(b.name)}" onchange="barSet(${i},'name',this.value)" style="flex:2" aria-label="Bar name">
+        <input inputmode="decimal" value="${b.w}" onchange="barSet(${i},'w',this.value)" style="flex:1" aria-label="Bar weight (lb)">
+        <span class="faint small">lb</span>
+      </div>`).join("")}
+      <h3 style="margin:12px 0 6px">Plates you own</h3>
+      <div class="row" style="gap:8px">
+        ${PLATE_DENOMS.map(p=>{
+          const n=(s.plateInv||{})[p]||0;
+          return `<span class="platechip ${n?"has":""}">
+            <button onclick="platesTap(${p})" aria-label="Add a ${p} lb plate">${p}${n?` <b>\u00d7${n}</b>`:""}</button>
+            ${n?`<button class="pm" onclick="platesMinus(${p})" aria-label="Remove a ${p} lb plate">\u2212</button>`:""}
+          </span>`;
+        }).join("")}
       </div>
-      <div class="nfield" style="margin-top:10px"><label>Plates per side (weight \u00d7 count)</label>
-        <input value="${esc(s.plates)}" onchange="settingSetText('plates',this.value)"></div>
-      <p class="faint small" style="margin-top:8px">Type a weight while logging a barbell or SSB set and the per-side loadout appears under the set rows. Count is how many of each plate you can put on ONE side. Weigh your SSB if you're not sure \u2014 most are 60\u201370 lb.</p>
+      <p class="faint small" style="margin-top:10px">Tap once per plate you own: two 45s = tap 45 twice. The math loads plates in pairs, so an odd plate is held in reserve (a lone 25 can't go on both sides). While logging a lift, pick the bar you're using and the per-side loadout appears under the set rows.</p>
     </div>
 
     <div class="card"><h2>Gist sync</h2>
@@ -885,6 +932,11 @@ function renderMore(){
     </div>`;
 }
 function settingSetText(k,v){ S.settings[k]=v.trim(); save(); render(); }
+function barSet(i,k,v){
+  if(k==="w"){ const n=num(v); if(n!=null&&n>=0) S.settings.bars[i].w=n; }
+  else { v=v.trim(); if(v) S.settings.bars[i].name=v; }
+  save(); render();
+}
 function settingSet(k,v){
   if(k==="startDate"){ if(/^\d{4}-\d{2}-\d{2}$/.test(v)) S.settings[k]=v; }
   else { const n=num(v); if(n!=null) S.settings[k]=n; }

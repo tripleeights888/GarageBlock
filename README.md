@@ -41,7 +41,9 @@ Pull is always safe: it only offers to replace local data when the Gist copy is 
 
 ## Plate math
 
-Set your straight bar and SSB weights and your per-side plate inventory in More > Plate math. While logging any barbell or SSB lift, typing a weight shows the per-side loadout under the set rows (e.g. 205 lb: 45 + 35). If a weight isn't loadable with your plates it shows the closest weight that is.
+More > Plate math holds your bars and plates. Three bars are pre-set (Ohio Bar 45, SSB 70, Curl Bar 30); edit the names and weights to match your equipment. For plates, tap a denomination once per plate you own (two 45s = tap 45 twice). The math loads in pairs, so an odd plate is held in reserve.
+
+While logging a barbell or SSB lift, a bar picker sits above the set rows; the app pre-selects the right bar (SSB for SSB movements, straight bar for bench/deadlift/press) and remembers any override per exercise. Typing a weight shows the per-side loadout (e.g. 205 lb on a 45 bar: 45 + 35). If a weight isn't loadable with your plates it shows the closest one that is.
 
 ## What's inside
 
